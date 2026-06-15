@@ -11,6 +11,33 @@ from functools import wraps
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="Team HTS Classifier", layout="wide")
 
+
+# ---------------------------------------------------------------------------
+# Simple Password Authentication
+# ---------------------------------------------------------------------------
+def require_password():
+    if st.session_state.get("authenticated"):
+        return
+
+    st.title("🔒 Team HTS Classifier")
+
+    password = st.text_input(
+        "Password",
+        type="password",
+        key="password_input"
+    )
+
+    if st.button("Login"):
+        if password == st.secrets["APP_PASSWORD"]:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Invalid password")
+
+    st.stop()
+
+require_password()
+
 # ---------------------------------------------------------------------------
 # Multi-user: require a display name before anything renders.
 # ---------------------------------------------------------------------------
