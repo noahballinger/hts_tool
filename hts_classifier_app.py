@@ -1,24 +1,18 @@
 import streamlit as st
 import pandas as pd
-import os
-import sqlite3
+import psycopg2
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from functools import wraps
 
 # ---------------------------------------------------------------------------
-# Configuration & Setup
+# Configuration
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="Team HTS Classifier", layout="wide")
 
-MATCH_FILE   = 'Odoo_HS_Codes_Final_Matched.csv'
-PRODUCT_FILE = 'Odoo_Products.csv'
-VENDOR_FILE  = 'Vendor HTS Codes.csv'
-DB_FILE      = 'classification_progress.db'
-
 # ---------------------------------------------------------------------------
-# Multi-user: require a display name before the app renders anything else.
-# This is stored only in the browser session – no passwords, no server state.
+# Multi-user: require a display name before anything renders.
 # ---------------------------------------------------------------------------
 def require_username():
     if not st.session_state.get("username"):
@@ -27,7 +21,7 @@ def require_username():
         if st.sidebar.button("Start Session") and name.strip():
             st.session_state.username = name.strip()
             st.rerun()
-        st.sidebar.info("Please enter your name to begin classifying.")
+        st.sidebar.info("Please enter your name to start classifying.")
         st.stop()
 
 require_username()
@@ -35,30 +29,28 @@ require_username()
 # ---------------------------------------------------------------------------
 # Database helpers
 # ---------------------------------------------------------------------------
+@contextmanager
 def get_db_connection():
-    """
-    WAL mode allows concurrent readers + one writer without blocking.
-    timeout=30 makes writers queue rather than crash on contention.
-    """
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
+    conn = psycopg2.connect(st.secrets["DATABASE_URL"])
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def db_retry(max_attempts: int = 4, base_delay: float = 0.3):
-    """
-    Exponential-backoff retry for transient SQLite lock errors.
-    Covers the window where two users write at exactly the same millisecond.
-    """
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
             for attempt in range(max_attempts):
                 try:
                     return func(*args, **kwargs)
-                except sqlite3.OperationalError as exc:
-                    if "locked" in str(exc).lower() and attempt < max_attempts - 1:
+                except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                    if attempt < max_attempts - 1:
                         time.sleep(base_delay * (2 ** attempt))
                     else:
                         raise
@@ -67,16 +59,12 @@ def db_retry(max_attempts: int = 4, base_delay: float = 0.3):
 
 
 def init_db():
-    """
-    Schema includes `classified_by` / `approved_by` so every action is
-    attributable to a team member.  Uses ALTER TABLE to add columns if an
-    older DB already exists without them.
-    """
+    """Creates app tables if they don't exist. Safe to run on every startup."""
     with get_db_connection() as conn:
         c = conn.cursor()
         c.execute('''
             CREATE TABLE IF NOT EXISTS category_approvals (
-                odoo_hs     TEXT PRIMARY KEY,
+                odoo_hs      TEXT PRIMARY KEY,
                 approved_hts TEXT,
                 approved_by  TEXT,
                 approved_at  TEXT
@@ -84,35 +72,35 @@ def init_db():
         ''')
         c.execute('''
             CREATE TABLE IF NOT EXISTS product_classifications (
-                product_id   TEXT PRIMARY KEY,
-                product_name TEXT,
-                old_hs       TEXT,
-                new_hts      TEXT,
+                product_id    TEXT PRIMARY KEY,
+                product_name  TEXT,
+                old_hs        TEXT,
+                new_hts       TEXT,
                 classified_by TEXT,
                 classified_at TEXT
             )
         ''')
-        # Non-destructive migration for existing DBs that lack the new columns
-        existing_cols = {row[1] for row in c.execute("PRAGMA table_info(category_approvals)")}
-        for col, typedef in [("approved_by", "TEXT"), ("approved_at", "TEXT")]:
-            if col not in existing_cols:
-                c.execute(f"ALTER TABLE category_approvals ADD COLUMN {col} {typedef}")
-
-        existing_cols = {row[1] for row in c.execute("PRAGMA table_info(product_classifications)")}
-        for col, typedef in [("classified_by", "TEXT")]:
-            if col not in existing_cols:
-                c.execute(f"ALTER TABLE product_classifications ADD COLUMN {col} {typedef}")
-
-        conn.commit()
 
 init_db()
 
 # ---------------------------------------------------------------------------
-# Static data (CSV files never change at runtime → no TTL needed)
+# Source data — now read from Supabase tables instead of CSV files.
+# Cached forever: this data never changes during a session.
 # ---------------------------------------------------------------------------
 @st.cache_data
 def load_source_data():
-    matches_df = pd.read_csv(MATCH_FILE)
+    with get_db_connection() as conn:
+        matches_df  = pd.read_sql_query("SELECT * FROM hs_matches",   conn)
+        products_df = pd.read_sql_query("SELECT * FROM products",      conn)
+        vendor_df   = pd.read_sql_query("SELECT * FROM vendor_codes",  conn)
+
+    # --- Normalise the matches table ---
+    # Find the HS code column (Supabase may lowercase headers)
+    hs_col   = next(c for c in matches_df.columns if c.lower().replace(' ','') in ('hscode','hs_code'))
+    desc_col = next(c for c in matches_df.columns if 'desc' in c.lower())
+    all_col  = next(c for c in matches_df.columns if 'vendor' in c.lower() or 'match' in c.lower())
+
+    matches_df = matches_df.rename(columns={hs_col: 'HS Code', desc_col: 'Description', all_col: 'All Vendor Matches'})
     matches_df['HS Code'] = (
         matches_df['HS Code']
         .astype(str)
@@ -128,24 +116,17 @@ def load_source_data():
         })
     )
 
-    if os.path.exists(PRODUCT_FILE):
-        products_df = pd.read_csv(PRODUCT_FILE)
-    else:
-        products_df = pd.DataFrame({
-            'Product_ID':      ['SKU-001', 'SKU-002', 'SKU-003'],
-            'Product_Name':    ['Castor Oil 500ml', 'Botanical Shampoo', 'Generic Prep'],
-            'Current_Odoo_HS': ['151530', '330510', '210690'],
-        })
+    # --- Normalise the vendor table into a description lookup dict ---
+    tariff_col = next(c for c in vendor_df.columns if 'tariff' in c.lower())
+    goods_col  = next((c for c in vendor_df.columns if 'goods' in c.lower()), None)
+    off_col    = next((c for c in vendor_df.columns if 'official' in c.lower()), None)
 
     desc_map = {}
-    if os.path.exists(VENDOR_FILE):
-        vendor_df = pd.read_csv(VENDOR_FILE)
-        vendor_df['Tariff'] = vendor_df['Tariff'].astype(str).str.replace(r'\D', '', regex=True)
-        for _, row in vendor_df.iterrows():
-            tariff    = str(row['Tariff']).strip()
-            g_desc    = str(row.get('Goods Description', '')).strip() if pd.notna(row.get('Goods Description')) else ''
-            o_desc    = str(row.get('Official Description', '')).strip() if pd.notna(row.get('Official Description')) else ''
-            desc_map[tariff] = f"{g_desc} | {o_desc}" if g_desc and o_desc else (g_desc or o_desc)
+    for _, row in vendor_df.iterrows():
+        tariff = str(row[tariff_col]).strip().replace('.0', '')
+        g = str(row[goods_col]).strip() if goods_col and pd.notna(row[goods_col]) else ''
+        o = str(row[off_col]).strip()   if off_col  and pd.notna(row[off_col])   else ''
+        desc_map[tariff] = f"{g} | {o}" if g and o else (g or o)
 
     return matches_df, products_df, desc_map
 
@@ -156,10 +137,14 @@ matches_df, products_df, desc_map = load_source_data()
 def make_label(hts_code: str) -> str:
     return f"{hts_code} | {desc_map.get(str(hts_code), 'No vendor description found')}"
 
+# Detect products table column names flexibly
+_id_col   = next(c for c in products_df.columns if 'id'   in c.lower())
+_name_col = next(c for c in products_df.columns if 'name' in c.lower())
+_hs_col   = next(c for c in products_df.columns if 'hs'   in c.lower() or 'odoo' in c.lower())
+products_df = products_df.rename(columns={_id_col: 'Product_ID', _name_col: 'Product_Name', _hs_col: 'Current_Odoo_HS'})
 
 # ---------------------------------------------------------------------------
-# Live DB reads – short TTL (15 s) so every user sees teammates' changes
-# quickly without hammering the DB on every interaction.
+# Live DB reads — 15-second TTL so teammates' changes appear quickly
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=15)
 def get_category_approvals() -> dict:
@@ -172,8 +157,7 @@ def get_category_approvals() -> dict:
 def get_classified_products() -> pd.DataFrame:
     with get_db_connection() as conn:
         return pd.read_sql_query(
-            "SELECT product_id, classified_by, classified_at FROM product_classifications",
-            conn
+            "SELECT product_id, classified_by, classified_at FROM product_classifications", conn
         )
 
 
@@ -199,7 +183,7 @@ if step == "1. Category Review":
     st.title("Step 1: Confirm Category Matches")
     st.markdown("Select the accurate **10-digit HTS Codes** for each Odoo category family.")
 
-    approvals    = get_category_approvals()
+    approvals     = get_category_approvals()
     existing_cats = {k: v.get('approved_hts', '') for k, v in approvals.items()}
     approval_meta = {k: (v.get('approved_by', ''), v.get('approved_at', '')) for k, v in approvals.items()}
 
@@ -212,14 +196,14 @@ if step == "1. Category Review":
 
             col_title, col_meta = st.columns([3, 1])
             with col_title:
-                st.subheader(f"`{odoo_hs}` – {row['Description']}")
+                st.subheader(f"`{odoo_hs}` - {row['Description']}")
             with col_meta:
                 if approval_meta.get(odoo_hs, ('', ''))[0]:
                     by, at = approval_meta[odoo_hs]
                     st.caption(f"✅ Saved by **{by}** on {at[:10]}")
 
-            saved_val        = existing_cats.get(odoo_hs, '')
-            saved_list       = [x.strip() for x in saved_val.split(',') if x.strip()]
+            saved_val         = existing_cats.get(odoo_hs, '')
+            saved_list        = [x.strip() for x in saved_val.split(',') if x.strip()]
             default_selection = [x for x in saved_list if x in options] or options
 
             st.multiselect(
@@ -241,27 +225,31 @@ if step == "1. Category Review":
                         hs  = str(mrow['HS Code'])
                         sel = st.session_state.get(f"cat_{hs}", [])
                         c.execute(
-                            '''INSERT OR REPLACE INTO category_approvals
-                               (odoo_hs, approved_hts, approved_by, approved_at)
-                               VALUES (?, ?, ?, ?)''',
+                            '''
+                            INSERT INTO category_approvals (odoo_hs, approved_hts, approved_by, approved_at)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (odoo_hs) DO UPDATE SET
+                                approved_hts = EXCLUDED.approved_hts,
+                                approved_by  = EXCLUDED.approved_by,
+                                approved_at  = EXCLUDED.approved_at
+                            ''',
                             (hs, ", ".join(sel), st.session_state.username, now),
                         )
-                    conn.commit()
 
             _save_categories()
             get_category_approvals.clear()
             st.success(f"✅ Categories saved by **{st.session_state.username}**! Proceed to Step 2.")
 
 # ===========================================================================
-# STEP 2 – PRODUCT REVIEW (collaborative, race-condition safe)
+# STEP 2 – PRODUCT REVIEW
 # ===========================================================================
 elif step == "2. Product Review":
     st.title("Step 2: Product Classification")
 
-    approvals       = get_category_approvals()
-    cat_mappings    = {k: v.get('approved_hts', '') for k, v in approvals.items()}
-    classified_df   = get_classified_products()
-    classified_ids  = classified_df['product_id'].tolist() if not classified_df.empty else []
+    approvals      = get_category_approvals()
+    cat_mappings   = {k: v.get('approved_hts', '') for k, v in approvals.items()}
+    classified_df  = get_classified_products()
+    classified_ids = classified_df['product_id'].tolist() if not classified_df.empty else []
 
     if not cat_mappings:
         st.warning("Please complete Step 1 (Category Review) to populate mapping choices first.")
@@ -274,7 +262,6 @@ elif step == "2. Product Review":
     st.progress(completed / total if total > 0 else 1.0)
     st.write(f"Progress: **{completed}** / **{total}** items classified.")
 
-    # Recent team activity feed
     if not classified_df.empty:
         with st.expander("📋 Recent team activity"):
             with get_db_connection() as conn:
@@ -301,7 +288,7 @@ elif step == "2. Product Review":
     options.append("Other (Manual Entry)")
 
     with st.form("product_form", clear_on_submit=True):
-        choice       = st.radio(
+        choice = st.radio(
             "Select 10-Digit HTS Code:",
             options=options,
             format_func=lambda x: x if x == "Other (Manual Entry)" else make_label(x),
@@ -315,27 +302,23 @@ elif step == "2. Product Review":
             def _save_product():
                 with get_db_connection() as conn:
                     c = conn.cursor()
-                    # Guard: check inside the transaction so two users
-                    # can't both claim the same product simultaneously.
-                    already = c.execute(
-                        "SELECT product_id FROM product_classifications WHERE product_id = ?",
+                    c.execute(
+                        "SELECT product_id FROM product_classifications WHERE product_id = %s",
                         (product_id,),
-                    ).fetchone()
-                    if already:
+                    )
+                    if c.fetchone():
                         return False
                     c.execute(
                         '''INSERT INTO product_classifications
                            (product_id, product_name, old_hs, new_hts, classified_by, classified_at)
-                           VALUES (?, ?, ?, ?, ?, ?)''',
+                           VALUES (%s, %s, %s, %s, %s, %s)''',
                         (product_id, row['Product_Name'], current_hs, final_code,
                          st.session_state.username, datetime.now().isoformat()),
                     )
-                    conn.commit()
                     return True
 
             saved = _save_product()
             get_classified_products.clear()
-
             if not saved:
                 st.warning("⚡ A teammate just classified this item — skipping to the next one.")
             st.rerun()
