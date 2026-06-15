@@ -172,11 +172,12 @@ matches_df, products_df, desc_map = load_source_data()
 def make_label(hts_code: str) -> str:
     return f"{hts_code} | {desc_map.get(str(hts_code), 'No vendor description found')}"
 
-# Detect products table column names flexibly
-_id_col   = next(c for c in products_df.columns if 'id'   in c.lower())
-_name_col = next(c for c in products_df.columns if 'name' in c.lower())
-_hs_col   = next(c for c in products_df.columns if 'hs'   in c.lower() or 'odoo' in c.lower())
-products_df = products_df.rename(columns={_id_col: 'Product_ID', _name_col: 'Product_Name', _hs_col: 'Current_Odoo_HS'})
+# Products table schema from Supabase
+products_df = products_df.rename(columns={
+    'Internal Reference': 'Product_ID',
+    'Name': 'Product_Name',
+    'HS Code': 'Current_Odoo_HS'
+})
 
 # ---------------------------------------------------------------------------
 # Live DB reads — 15-second TTL so teammates' changes appear quickly
