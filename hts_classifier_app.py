@@ -205,6 +205,7 @@ st.sidebar.markdown(f"👤 **Session:** {st.session_state.username}")
 step = st.sidebar.radio("Go to:", [
     "1. Category Review",
     "2. Product Review",
+    "2B. Batch Classification",
     "3. Export & Progress",
 ])
 if st.sidebar.button("🔄 Refresh team data"):
