@@ -162,6 +162,8 @@ def load_source_data():
 
 
 matches_df, products_df, desc_map = load_source_data()
+print("RAW COLUMNS")
+print(matches_df.columns.tolist())
 
 
 def make_label(hts_code: str) -> str:
