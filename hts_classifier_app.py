@@ -136,6 +136,8 @@ def load_source_data():
     )
     matches_df = matches_df.drop_duplicates(subset=['HS Code'])
     matches_df = matches_df.reset_index(drop=True)
+    print(matches_df.columns.tolist())
+print(matches_df.columns[matches_df.columns.duplicated()].tolist())
     matches_df['HTS_Options'] = matches_df['All Vendor Matches'].apply(
         lambda x: list({
             str(c).strip()
