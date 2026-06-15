@@ -320,120 +320,95 @@ elif step == "2. Product Review":
     st.header(row['Product_Name'])
     st.markdown(f"**SKU:** `{product_id}` | **Category context:** `{current_hs}`")
 
+    options = [x.strip() for x in cat_mappings.get(current_hs, '').split(',') if x.strip()]
+    options.append("Other (Manual Entry)")
+
 
     with st.form("product_form", clear_on_submit=True):
 
-    choice = st.radio(
-        "Select 10-Digit HTS Code:",
-        options=options,
-        format_func=lambda x: x if x == "Other (Manual Entry)" else make_label(x),
-    )
+        choice = st.radio(
+            "Select 10-Digit HTS Code:",
+            options=options,
+            format_func=lambda x: x if x == "Other (Manual Entry)" else make_label(x),
+        )
 
-    st.markdown("### Or Search All Available HTS Codes")
+        st.markdown("### Or Search All Available HTS Codes")
 
-    all_hts_codes = sorted(desc_map.keys())
+        all_hts_codes = sorted(desc_map.keys())
 
-    searched_code = st.selectbox(
-        "Search HTS Codes",
-        options=[""] + all_hts_codes,
-        format_func=lambda x: (
-            "Search for an HTS code..."
-            if x == ""
-            else make_label(x)
-        ),
-    )
+        searched_code = st.selectbox(
+            "Search HTS Codes",
+            options=[""] + all_hts_codes,
+            format_func=lambda x: (
+                "Search for an HTS code..."
+                if x == ""
+                else make_label(x)
+            ),
+        )
 
-    manual_entry = st.text_input(
-        "Custom HTS Code (optional)"
-    )
-
-    if st.form_submit_button("Confirm & Next Item", type="primary"):
-
-        if manual_entry.strip():
-            final_code = manual_entry.strip()
-
-        elif searched_code:
-            final_code = searched_code
-
-        else:
-            final_code = (
-                choice
-                if choice != "Other (Manual Entry)"
-                else manual_entry.strip()
-            )
-
-        if not final_code:
-            st.error("Please select or enter an HTS code.")
-            st.stop()
-
-        @db_retry()
-        def _save_product():
-            with get_db_connection() as conn:
-                c = conn.cursor()
-
-                c.execute(
-                    "SELECT product_id FROM product_classifications WHERE product_id = %s",
-                    (product_id,),
-                )
-
-                if c.fetchone():
-                    return False
-
-                c.execute(
-                    '''
-                    INSERT INTO product_classifications
-                    (product_id, product_name, old_hs, new_hts, classified_by, classified_at)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ''',
-                    (
-                        product_id,
-                        row['Product_Name'],
-                        current_hs,
-                        final_code,
-                        st.session_state.username,
-                        datetime.now().isoformat()
-                    ),
-                )
-
-                return True
-
-        saved = _save_product()
-
-        get_classified_products.clear()
-
-        if not saved:
-            st.warning(
-                "⚡ A teammate just classified this item — skipping to the next one."
-            )
-
-        st.rerun()
+        manual_entry = st.text_input(
+            "Custom HTS Code (optional)"
+        )
 
         if st.form_submit_button("Confirm & Next Item", type="primary"):
-            final_code = manual_entry.strip() if choice == "Other (Manual Entry)" else choice
+
+            if manual_entry.strip():
+                final_code = manual_entry.strip()
+
+            elif searched_code:
+                final_code = searched_code
+
+            else:
+                final_code = (
+                    choice
+                    if choice != "Other (Manual Entry)"
+                    else manual_entry.strip()
+                )
+
+            if not final_code:
+                st.error("Please select or enter an HTS code.")
+                st.stop()
 
             @db_retry()
             def _save_product():
                 with get_db_connection() as conn:
                     c = conn.cursor()
+
                     c.execute(
                         "SELECT product_id FROM product_classifications WHERE product_id = %s",
                         (product_id,),
                     )
+
                     if c.fetchone():
                         return False
+
                     c.execute(
-                        '''INSERT INTO product_classifications
-                           (product_id, product_name, old_hs, new_hts, classified_by, classified_at)
-                           VALUES (%s, %s, %s, %s, %s, %s)''',
-                        (product_id, row['Product_Name'], current_hs, final_code,
-                         st.session_state.username, datetime.now().isoformat()),
+                        '''
+                        INSERT INTO product_classifications
+                        (product_id, product_name, old_hs, new_hts, classified_by, classified_at)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ''',
+                        (
+                            product_id,
+                            row['Product_Name'],
+                            current_hs,
+                            final_code,
+                            st.session_state.username,
+                            datetime.now().isoformat()
+                        ),
                     )
+
                     return True
 
             saved = _save_product()
+
             get_classified_products.clear()
+
             if not saved:
-                st.warning("⚡ A teammate just classified this item — skipping to the next one.")
+                st.warning(
+                    "⚡ A teammate just classified this item — skipping to the next one."
+                )
+
             st.rerun()
 
 # ===========================================================================
