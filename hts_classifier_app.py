@@ -128,7 +128,7 @@ def load_source_data():
     # Find the HS code column (Supabase may lowercase headers)
     hs_col   = next(c for c in matches_df.columns if c.lower().replace(' ','') in ('hscode','hs_code'))
     desc_col = next(c for c in matches_df.columns if 'desc' in c.lower())
-    all_col  = next(c for c in matches_df.columns if 'vendor' in c.lower() or 'match' in c.lower())
+    all_col = "All Vendor Matches"
 
 
     matches_df = matches_df.rename(columns={hs_col: 'HS Code', desc_col: 'Description', all_col: 'All Vendor Matches'})
