@@ -410,7 +410,248 @@ elif step == "2. Product Review":
                 )
 
             st.rerun()
+# ===========================================================================
+# STEP 2B – BATCH CLASSIFICATION
+# ===========================================================================
+elif step == "2B. Batch Classification":
 
+    st.title("Step 2B: Batch Classification")
+
+    approvals = get_category_approvals()
+    cat_mappings = {k: v.get('approved_hts', '') for k, v in approvals.items()}
+
+    classified_df = get_classified_products()
+    classified_ids = (
+        classified_df['product_id'].astype(str).tolist()
+        if not classified_df.empty
+        else []
+    )
+
+    remaining = products_df[
+        ~products_df['Product_ID'].astype(str).isin(classified_ids)
+    ].copy()
+
+    if remaining.empty:
+        st.success("🎉 No remaining products to classify.")
+        st.stop()
+
+    st.subheader("Find Products")
+
+    search_term = st.text_input(
+        "Search Product Name",
+        placeholder="shirt, kurta, tunic, pants..."
+    )
+
+    category_options = sorted(
+        remaining["Current_Odoo_HS"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
+    category_filter = st.selectbox(
+        "Filter by Odoo Category",
+        ["All Categories"] + category_options
+    )
+
+    filtered = remaining.copy()
+
+    if search_term:
+        filtered = filtered[
+            filtered["Product_Name"]
+            .astype(str)
+            .str.contains(search_term, case=False, na=False)
+        ]
+
+    if category_filter != "All Categories":
+        filtered = filtered[
+            filtered["Current_Odoo_HS"].astype(str)
+            == category_filter
+        ]
+
+    st.write(f"Showing **{len(filtered)}** products")
+
+    if filtered.empty:
+        st.info("No products match the filters.")
+        st.stop()
+
+    filtered = filtered.copy()
+    filtered["Select"] = False
+
+    select_all = st.checkbox("Select All Visible Products")
+
+    if select_all:
+        filtered["Select"] = True
+
+    editor_df = st.data_editor(
+        filtered[
+            [
+                "Select",
+                "Product_ID",
+                "Product_Name",
+                "Current_Odoo_HS"
+            ]
+        ],
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        key="batch_editor"
+    )
+
+    selected = editor_df[editor_df["Select"]]
+
+    st.write(f"Selected Products: **{len(selected)}**")
+
+    if len(selected) == 0:
+        st.stop()
+
+    st.divider()
+
+    st.subheader("Choose HTS Code")
+
+    suggested_codes = []
+
+    selected_categories = (
+        filtered[
+            filtered["Product_ID"]
+            .isin(selected["Product_ID"])
+        ]["Current_Odoo_HS"]
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
+    for cat in selected_categories:
+
+        approved = cat_mappings.get(cat, "")
+
+        if approved:
+            suggested_codes.extend([
+                x.strip()
+                for x in approved.split(",")
+                if x.strip()
+            ])
+
+    suggested_codes = sorted(set(suggested_codes))
+
+    if suggested_codes:
+
+        selected_suggested = st.radio(
+            "Suggested HTS Codes",
+            ["None"] + suggested_codes,
+            format_func=lambda x: (
+                x
+                if x == "None"
+                else make_label(x)
+            )
+        )
+
+    else:
+        selected_suggested = "None"
+        st.info("No suggested HTS codes available.")
+
+    st.markdown("### Search All HTS Codes")
+
+    all_hts_codes = sorted(desc_map.keys())
+
+    searched_hts = st.selectbox(
+        "Search HTS Database",
+        options=[""] + all_hts_codes,
+        format_func=lambda x: (
+            "Search for HTS code..."
+            if x == ""
+            else make_label(x)
+        )
+    )
+
+    manual_hts = st.text_input(
+        "Custom HTS Code (optional)"
+    )
+
+    if st.button(
+        f"Assign HTS To {len(selected)} Products",
+        type="primary"
+    ):
+
+        final_code = None
+
+        if manual_hts.strip():
+            final_code = manual_hts.strip()
+
+        elif searched_hts:
+            final_code = searched_hts
+
+        elif selected_suggested != "None":
+            final_code = selected_suggested
+
+        if not final_code:
+            st.error("Please select or enter an HTS code.")
+            st.stop()
+
+        @db_retry()
+        def _batch_save():
+
+            with get_db_connection() as conn:
+
+                c = conn.cursor()
+
+                now = datetime.now().isoformat()
+
+                inserted = 0
+
+                for _, row in selected.iterrows():
+
+                    product_id = str(row["Product_ID"])
+
+                    c.execute(
+                        """
+                        SELECT product_id
+                        FROM product_classifications
+                        WHERE product_id = %s
+                        """,
+                        (product_id,)
+                    )
+
+                    if c.fetchone():
+                        continue
+
+                    c.execute(
+                        """
+                        INSERT INTO product_classifications
+                        (
+                            product_id,
+                            product_name,
+                            old_hs,
+                            new_hts,
+                            classified_by,
+                            classified_at
+                        )
+                        VALUES (%s,%s,%s,%s,%s,%s)
+                        """,
+                        (
+                            product_id,
+                            row["Product_Name"],
+                            row["Current_Odoo_HS"],
+                            final_code,
+                            st.session_state.username,
+                            now
+                        )
+                    )
+
+                    inserted += 1
+
+                return inserted
+
+        inserted = _batch_save()
+
+        get_classified_products.clear()
+
+        st.success(
+            f"✅ Assigned HTS {final_code} to {inserted} products."
+        )
+
+        st.rerun()
 # ===========================================================================
 # STEP 3 – EXPORT & AUDIT
 # ===========================================================================
