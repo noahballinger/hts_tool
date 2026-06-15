@@ -135,6 +135,7 @@ def load_source_data():
         .str.strip()
     )
     matches_df = matches_df.drop_duplicates(subset=['HS Code'])
+    matches_df = matches_df.reset_index(drop=True)
     matches_df['HTS_Options'] = matches_df['All Vendor Matches'].apply(
         lambda x: list({
             str(c).strip()
