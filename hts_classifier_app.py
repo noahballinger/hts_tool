@@ -120,12 +120,16 @@ def load_source_data():
         matches_df  = pd.read_sql_query("SELECT * FROM hs_matches",   conn)
         products_df = pd.read_sql_query("SELECT * FROM products",      conn)
         vendor_df   = pd.read_sql_query("SELECT * FROM vendor_codes",  conn)
+    
+    print("RAW COLUMNS")
+    print(matches_df.columns.tolist())
 
     # --- Normalise the matches table ---
     # Find the HS code column (Supabase may lowercase headers)
     hs_col   = next(c for c in matches_df.columns if c.lower().replace(' ','') in ('hscode','hs_code'))
     desc_col = next(c for c in matches_df.columns if 'desc' in c.lower())
     all_col  = next(c for c in matches_df.columns if 'vendor' in c.lower() or 'match' in c.lower())
+
 
     matches_df = matches_df.rename(columns={hs_col: 'HS Code', desc_col: 'Description', all_col: 'All Vendor Matches'})
     matches_df['HS Code'] = (
@@ -162,8 +166,7 @@ def load_source_data():
 
 
 matches_df, products_df, desc_map = load_source_data()
-print("RAW COLUMNS")
-print(matches_df.columns.tolist())
+
 
 
 def make_label(hts_code: str) -> str:
