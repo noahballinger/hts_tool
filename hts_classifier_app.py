@@ -488,6 +488,7 @@ elif step == "2B. Batch Classification":
         filtered[
             [
                 "Select",
+                "Product_ID",
                 "Barcode",
                 "Product_Name",
                 "Current_Odoo_HS"
