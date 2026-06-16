@@ -462,18 +462,26 @@ elif step == "2B. Batch Classification":
 
         search_term = search_term.strip()
 
-        filtered = filtered[
-            filtered["Product_Name"]
+        search_mask = (
+            filtered["Product_ID"]
                 .astype(str)
                 .str.contains(search_term, case=False, na=False)
 
             |
 
-            filtered["Product_ID"]
+            filtered["Product_Name"]
                 .astype(str)
                 .str.contains(search_term, case=False, na=False)
-        ]
+        )
 
+        if "Barcode" in filtered.columns:
+            search_mask |= (
+                filtered["Barcode"]
+                    .astype(str)
+                    .str.contains(search_term, case=False, na=False)
+            )
+
+    filtered = filtered[search_mask]
     if category_filter != "All Categories":
         filtered = filtered[
             filtered["Current_Odoo_HS"].astype(str)
