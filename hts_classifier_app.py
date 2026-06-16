@@ -481,7 +481,8 @@ elif step == "2B. Batch Classification":
                     .str.contains(search_term, case=False, na=False)
             )
 
-    filtered = filtered[search_mask]
+        filtered = filtered[search_mask]
+
     if category_filter != "All Categories":
         filtered = filtered[
             filtered["Current_Odoo_HS"].astype(str)
