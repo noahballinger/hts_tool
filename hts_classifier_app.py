@@ -459,10 +459,19 @@ elif step == "2B. Batch Classification":
     filtered = remaining.copy()
 
     if search_term:
+
+        search_term = search_term.strip()
+
         filtered = filtered[
             filtered["Product_Name"]
-            .astype(str)
-            .str.contains(search_term, case=False, na=False)
+                .astype(str)
+                .str.contains(search_term, case=False, na=False)
+
+            |
+
+            filtered["Product_ID"]
+                .astype(str)
+                .str.contains(search_term, case=False, na=False)
         ]
 
     if category_filter != "All Categories":
