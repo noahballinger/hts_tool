@@ -443,19 +443,6 @@ elif step == "2B. Batch Classification":
         placeholder="shirt, kurta, tunic, pants..."
     )
 
-    category_options = sorted(
-        remaining["Current_Odoo_HS"]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
-    )
-
-    category_filter = st.selectbox(
-        "Filter by Odoo Category",
-        ["All Categories"] + category_options
-    )
-
     filtered = remaining.copy()
 
     if search_term:
@@ -502,6 +489,7 @@ elif step == "2B. Batch Classification":
             [
                 "Select",
                 "Product_ID",
+                "Barcode",
                 "Product_Name",
                 "Current_Odoo_HS"
             ]
