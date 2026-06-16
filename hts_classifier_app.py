@@ -483,12 +483,6 @@ elif step == "2B. Batch Classification":
 
         filtered = filtered[search_mask]
 
-    if category_filter != "All Categories":
-        filtered = filtered[
-            filtered["Current_Odoo_HS"].astype(str)
-            == category_filter
-        ]
-
     st.write(f"Showing **{len(filtered)}** products")
 
     if filtered.empty:
