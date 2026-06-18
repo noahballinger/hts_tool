@@ -207,6 +207,7 @@ step = st.sidebar.radio("Go to:", [
     "2. Product Review",
     "2B. Batch Classification",
     "3. Export & Progress",
+    "4. Review HTS Groups",
 ])
 if st.sidebar.button("🔄 Refresh team data"):
     get_category_approvals.clear()
@@ -682,3 +683,125 @@ elif step == "3. Export & Progress":
         file_name="Final_Classified_Products.csv",
         mime='text/csv',
     )
+    # ===========================================================================
+# STEP 4 – REVIEW HTS GROUPS
+# ===========================================================================
+elif step == "4. Review HTS Groups":
+    st.title("Step 4: Review HTS Code Groups")
+    st.markdown(
+        "Inspect every HTS code in use, see which products belong to each group, "
+        "and flag items to send back for reclassification."
+    )
+
+    with get_db_connection() as conn:
+        results_df = pd.read_sql_query(
+            "SELECT * FROM product_classifications ORDER BY new_hts, product_name",
+            conn,
+        )
+
+    if results_df.empty:
+        st.info("No classifications committed yet.")
+        st.stop()
+
+    # ── Summary metrics ────────────────────────────────────────────────────
+    col1, col2 = st.columns(2)
+    col1.metric("Distinct HTS Codes in Use", results_df["new_hts"].nunique())
+    col2.metric("Total Products Classified",  len(results_df))
+
+    # ── Search bar ─────────────────────────────────────────────────────────
+    search = st.text_input(
+        "🔍 Filter by HTS code or product name",
+        placeholder="e.g.  6109,  shirt,  kurta …",
+    )
+
+    st.divider()
+
+    # ── One expander per HTS code ──────────────────────────────────────────
+    to_remove = []
+
+    for hts_code, group in results_df.groupby("new_hts"):
+
+        q = search.strip().lower() if search else ""
+
+        if q:
+            code_hit  = q in str(hts_code).lower()
+            name_mask = group["product_name"].str.lower().str.contains(q, na=False)
+            name_hit  = name_mask.any()
+
+            if not code_hit and not name_hit:
+                continue                         # skip group entirely
+
+            if not code_hit and name_hit:        # narrow to matching rows only
+                group = group[name_mask]
+
+        description = desc_map.get(str(hts_code))
+
+        # Build expander title
+        desc_snippet = description[:60] + "…" if description and len(description) > 60 else (description or "⚠️ No description found")
+        expander_label = f"`{hts_code}`  —  {desc_snippet}  ·  {len(group)} product(s)"
+
+        with st.expander(expander_label, expanded=bool(q)):
+
+            # Description row
+            if description:
+                st.caption(f"📋 {description}")
+            else:
+                usitc_url = f"https://hts.usitc.gov/search?query={hts_code}"
+                st.markdown(
+                    f"⚠️ No description found in vendor data. &nbsp;"
+                    f"[🔍 Look up **{hts_code}** on the USITC tariff schedule ↗]({usitc_url})",
+                    unsafe_allow_html=True,
+                )
+
+            # Product table with removal checkboxes
+            display = group[
+                ["product_id", "product_name", "old_hs", "classified_by", "classified_at"]
+            ].copy()
+            display.insert(0, "Remove?", False)
+
+            edited = st.data_editor(
+                display,
+                column_config={
+                    "Remove?":       st.column_config.CheckboxColumn("Remove?", default=False, width="small"),
+                    "product_id":    st.column_config.TextColumn("SKU / ID",        width="medium"),
+                    "product_name":  st.column_config.TextColumn("Product Name",    width="large"),
+                    "old_hs":        st.column_config.TextColumn("Old HS",          width="small"),
+                    "classified_by": st.column_config.TextColumn("Classified By",   width="small"),
+                    "classified_at": st.column_config.TextColumn("Date",            width="medium"),
+                },
+                hide_index=True,
+                use_container_width=True,
+                num_rows="fixed",
+                key=f"review_{hts_code}",
+            )
+
+            flagged = edited.loc[edited["Remove?"], "product_id"].tolist()
+            to_remove.extend(flagged)
+
+    # ── Global removal footer ──────────────────────────────────────────────
+    if to_remove:
+        st.divider()
+        st.warning(
+            f"**{len(to_remove)}** product(s) selected for removal — "
+            "they will be deleted from classifications and returned to the reclassification queue."
+        )
+        if st.button(
+            f"🗑️ Remove {len(to_remove)} product(s) & send back for reclassification",
+            type="primary",
+        ):
+            @db_retry()
+            def _remove_flagged():
+                with get_db_connection() as conn:
+                    c = conn.cursor()
+                    c.execute(
+                        "DELETE FROM product_classifications WHERE product_id = ANY(%s)",
+                        (to_remove,),
+                    )
+
+            _remove_flagged()
+            get_classified_products.clear()
+            st.success(
+                f"✅ {len(to_remove)} product(s) removed — "
+                "they'll reappear in Step 2 / 2B for reclassification."
+            )
+            st.rerun()
